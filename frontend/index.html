@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Portaldot NodeWatch — Testnet Health Dashboard</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 860px; margin: 2rem auto; padding: 0 1rem; color: #111; }
+  h1 { font-size: 1.6rem; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 1rem; }
+  .card { border: 1px solid #ddd; border-radius: 12px; padding: 1rem; }
+  .card b { display: block; font-size: 1.3rem; }
+  table { width: 100%; border-collapse: collapse; margin-top: 1rem; }
+  th, td { text-align: left; padding: .4rem .6rem; border-bottom: 1px solid #eee; font-size: .9rem; }
+  input, button { padding: .5rem; font-size: 1rem; }
+  input { width: 100%; box-sizing: border-box; margin: .25rem 0; }
+  .muted { color: #666; font-size: .9rem; }
+  .err { color: #b00; }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/ethers@6.13.4/dist/ethers.umd.min.js"></script>
+</head>
+<body>
+<h1>Portaldot NodeWatch</h1>
+<p class="muted">Testnet health dashboard for Portaldot Network V3.0 testnet (Chain ID 420420777).
+Reads need no wallet. Registering a node is an on-chain write and needs a connected wallet.</p>
+
+<h2>Testnet stats <span id="live" class="muted"></span></h2>
+<div class="grid">
+  <div class="card">Chain ID<b id="stat-chain">…</b></div>
+  <div class="card">Latest block<b id="stat-block">…</b></div>
+  <div class="card">Block time<b id="stat-blocktime">…</b></div>
+  <div class="card">Gas price (wei)<b id="stat-gas">…</b></div>
+  <div class="card">Peers<b id="stat-peers">…</b></div>
+  <div class="card">Latest miner<b id="stat-miner">…</b></div>
+</div>
+<p id="rpc-error" class="err"></p>
+
+<h2>Watched nodes (from NodeWatchRegistry)</h2>
+<p class="muted">Contract address: <span id="contract-addr">not deployed yet — set CONTRACT_ADDRESS below after testnet deployment</span></p>
+<table>
+  <thead><tr><th>#</th><th>Name</th><th>Endpoint / identifier</th><th>Owner</th><th>Status</th></tr></thead>
+  <tbody id="nodes-body"><tr><td colspan="5" class="muted">No contract connected yet.</td></tr></tbody>
+</table>
+
+<h2>Register a node to watch</h2>
+<form id="add-form">
+  <input id="node-name" placeholder="Node name (e.g. my-validator-01)" required>
+  <input id="node-endpoint" placeholder="Endpoint or identifier (e.g. wss://… or node id)" required>
+  <button type="submit">Register on-chain</button>
+</form>
+<p id="form-msg" class="muted"></p>
+
+<script>
+const RPC_URL = "https://test-evm-rpc-v3.portaldot.dev";
+// TODO: paste the deployed NodeWatchRegistry address here after testnet deployment.
+const CONTRACT_ADDRESS = "";
+let ABI = null;
+
+async function rpc(method, params) {
+  const r = await fetch(RPC_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", method, params, id: 1 }),
+  });
+  const j = await r.json();
+  if (j.error) throw new Error(j.error.message);
+  return j.result;
+}
+
+async function refreshStats() {
+  try {
+    const [chainId, blockHex, gasHex, peersHex] = await Promise.all([
+      rpc("eth_chainId", []),
+      rpc("eth_blockNumber", []),
+      rpc("eth_gasPrice", []),
+      rpc("net_peerCount", []),
+    ]);
+    const block = await rpc("eth_getBlockByNumber", [blockHex, false]);
+    const prev = await rpc("eth_getBlockByNumber", ["0x" + (parseInt(blockHex, 16) - 1).toString(16), false]);
+    document.getElementById("stat-chain").textContent = parseInt(chainId, 16);
+    document.getElementById("stat-block").textContent = parseInt(blockHex, 16);
+    document.getElementById("stat-gas").textContent = parseInt(gasHex, 16);
+    document.getElementById("stat-peers").textContent = parseInt(peersHex, 16);
+    document.getElementById("stat-blocktime").textContent =
+      (parseInt(block.timestamp, 16) - parseInt(prev.timestamp, 16)) + "s";
+    document.getElementById("stat-miner").textContent =
+      block.miner.slice(0, 10) + "…" + block.miner.slice(-6);
+    document.getElementById("live").textContent = "● live, updated " + new Date().toLocaleTimeString();
+    document.getElementById("rpc-error").textContent = "";
+  } catch (e) {
+    document.getElementById("rpc-error").textContent = "RPC read failed: " + e.message;
+  }
+}
+
+async function refreshNodes() {
+  if (!CONTRACT_ADDRESS || !window.ethers) return;
+  try {
+    if (!ABI) ABI = await (await fetch("abi.json")).json();
+    const provider = new ethers.JsonRpcProvider(RPC_URL);
+    const contract = new ethers.Contract(CONTRACT_ADDRESS, ABI, provider);
+    const nodes = await contract.listNodes();
+    document.getElementById("contract-addr").textContent = CONTRACT_ADDRESS;
+    const body = document.getElementById("nodes-body");
+    body.innerHTML = nodes.length ? "" : '<tr><td colspan="5" class="muted">No nodes registered yet.</td></tr>';
+    nodes.forEach((n, i) => {
+      const tr = document.createElement("tr");
+      tr.innerHTML = `<td>${i}</td><td>${n.name}</td><td>${n.endpoint}</td>` +
+        `<td>${n.owner.slice(0, 8)}…</td><td>${n.active ? "active" : "removed"}</td>`;
+      body.appendChild(tr);
+    });
+  } catch (e) {
+    document.getElementById("nodes-body").innerHTML =
+      `<tr><td colspan="5" class="err">Contract read failed: ${e.message}</td></tr>`;
+  }
+}
+
+document.getElementById("add-form").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const msg = document.getElementById("form-msg");
+  if (!CONTRACT_ADDRESS) { msg.textContent = "Contract not deployed yet — nothing to write to."; return; }
+  if (!window.ethereum) { msg.textContent = "Connect a wallet (e.g. MetaMask on Portaldot testnet) to register."; return; }
+  try {
+    if (!ABI) ABI = await (await fetch("abi.json")).json();
+    const provider = new ethers.BrowserProvider(window.ethereum);
+    const signer = await provider.getSigner();
+    const contract = new ethers.Contract(CONTRACT_ADDRESS, ABI, signer);
+    const tx = await contract.registerNode(
+      document.getElementById("node-name").value,
+      document.getElementById("node-endpoint").value
+    );
+    msg.textContent = "Transaction sent: " + tx.hash + " — waiting for confirmation…";
+    await tx.wait();
+    msg.textContent = "Registered! Tx: " + tx.hash;
+    refreshNodes();
+  } catch (e) {
+    msg.textContent = "Write failed: " + (e.message || e);
+  }
+});
+
+refreshStats();
+refreshNodes();
+setInterval(refreshStats, 6000); // testnet block time is ~6s
+setInterval(refreshNodes, 15000);
+</script>
+</body>
+</html>
